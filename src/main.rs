@@ -1,30 +1,31 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{RefCell};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, Read};
-use std::ops::Deref;
 use std::process::exit;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{channel, Sender};
-use std::thread;
 use clap::{Arg, Command};
 
 use pipewire as pw;
 use pw::prelude::*;
 use pw::types::ObjectType;
-use pipewire_sys as sys;
-// spa_interface_call_method! needs this
-use libspa_sys as spa_sys;
 use pipewire::proxy::ProxyT;
 use pipewire::registry::{GlobalObject, Registry};
 use pipewire::spa::{ForeignDict, ParsableValue};
 
 #[derive(Clone)]
-struct LinkCfg {
-    // TODO: allow single node
-    input: String,
-    output: String,
-    replace: bool // disconnect other links
+enum LinkCfg {
+    // (output, input)
+    Connect(String, String),
+    DeleteIn(String),
+    DeleteOut(String)
+}
+
+#[derive(Debug, Default)]
+struct ConfigCache {
+    connect: HashMap<String, (String, String)>,
+    delete_in: HashMap<String, String>,
+    delete_out: HashMap<String, String>,
+    all: HashSet<String>
 }
 
 #[derive(Debug)]
@@ -67,23 +68,33 @@ enum Event<'a> {
     Delete(u32)
 }
 
-fn parse_cmdline() -> Vec<LinkCfg> {
-    let link = Arg::new("link")
-        .long("link")
-        .help("Comma separated pair of node names (input,output)");
-    let override_link = Arg::new("link-override")
-        .long("link-override")
-        .help("links but existing links between ports will be disconnected");
-    let matches = Command::new("pw-autolink")
-        .arg(link)
-        .arg(override_link)
-        .get_matches();
 
-    return matches.get_many::<String>("link").unwrap_or(Default::default()).map(|s| (s, false))
-        .chain(matches.get_many::<String>("link-override").unwrap_or(Default::default()).map(|s| (s, true)))
-        .map(|(s, b)| (s.split_once(',').expect("link arguments must be comma separated pairs"), b))
-        .map(|((a, b), replace)| LinkCfg{input: a.to_owned(), output: b.to_owned(), replace})
-        .collect()
+fn parse_cmdline() -> (Command, Vec<LinkCfg>) {
+    let link = Arg::new("connect")
+        .long("connect")
+        .help("Connect a node's output to another node's input (output,input)");
+    let delete_in = Arg::new("delete-in")
+        .long("delete-in")
+        .help("Delete links from this node's input (links created by autolink are not deleted)");
+    let delete_out = Arg::new("delete-out")
+        .long("delete-out")
+        .help("Like delete-in but the output");
+    let cmd = Command::new("pw-autolink")
+        .arg(link)
+        .arg(delete_in)
+        .arg(delete_out);
+    let cmd_clone = cmd.clone();
+    let matches = cmd.get_matches();
+
+    let connects = matches.get_many::<String>("connect").unwrap_or(Default::default())
+        .map(|s| (s.split_once(',').expect("connect arguments must be comma separated pairs")))
+        .map(|(output, input)| LinkCfg::Connect(output.to_owned(), input.to_owned()));
+    let delete_ins = matches.get_many::<String>("delete-in").unwrap_or(Default::default())
+        .map(|s| LinkCfg::DeleteIn(s.to_owned()));
+    let delete_outs = matches.get_many::<String>("delete-out").unwrap_or(Default::default())
+        .map(|s| LinkCfg::DeleteOut(s.to_owned()));
+
+    return (cmd_clone, connects.chain(delete_ins).chain(delete_outs).collect());
 }
 
 #[derive(Debug)]
@@ -94,8 +105,7 @@ struct NodeData {
 }
 
 fn create_link(core: &pw::Core, pin: &Port, pout: &Port) -> pw::link::Link {
-    let link = core
-        .create_object::<pw::link::Link, _>(
+    return core.create_object::<pw::link::Link, _>(
             "link-factory", // TODO: find the link factory the same way the example does
             &pw::properties! {
                 "link.output.port" => pout.id.to_string(),
@@ -107,28 +117,35 @@ fn create_link(core: &pw::Core, pin: &Port, pout: &Port) -> pw::link::Link {
             },
         )
         .expect("Failed to create object");
-    /*let listener = link.add_listener_local()
-        .info(|info| {
-            println!("linkinfo {:?}", info);
-        })
-        .register();*/
-    return link;
 }
 
 fn main() {
-    let cfg = parse_cmdline();
-    if cfg.is_empty() {
-        println!("No link arguments given");
-        //exit(1);
+    let (mut command, cfgs) = parse_cmdline();
+    if cfgs.is_empty() {
+        command.print_long_help().unwrap();
+        exit(1);
     }
-    let cfg_by_name = cfg.iter()
-        .flat_map(|cfg| [
-            (cfg.input.clone(), (cfg.clone(), cfg.output.clone())),
-            (cfg.output.clone(), (cfg.clone(), cfg.input.clone()))
-        ])
-        .collect::<HashMap<String, (LinkCfg, String)>>();
+    let mut by_name = ConfigCache::default();
+    for cfg in cfgs {
+        match cfg {
+            LinkCfg::Connect(output, input) => {
+                by_name.connect.insert(output.clone(), (output.clone(), input.clone()));
+                by_name.connect.insert(input.clone(), (output.clone(), input.clone()));
+                by_name.all.insert(input.clone());
+                by_name.all.insert(output.clone());
+            },
+            LinkCfg::DeleteIn(name) => {
+                by_name.delete_in.insert(name.clone(), name.clone());
+                by_name.all.insert(name);
+            },
+            LinkCfg::DeleteOut(name) => {
+                by_name.delete_out.insert(name.clone(), name.clone());
+                by_name.all.insert(name);
+            }
+        }
+    }
 
-    listener_thread(cfg_by_name);
+    listener_thread(by_name);
 }
 
 #[derive(Default)]
@@ -139,14 +156,14 @@ struct State {
     temp_links: Vec<(pw::link::Link, pw::link::LinkListener)>
 }
 
-fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>, cfg_by_name: &HashMap<String, (LinkCfg, String)>, event: Event) {
-    println!("{:?}", &event);
+fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>, cfg_by_name: &ConfigCache, event: Event) {
+    //println!("{:?}", &event);
     let mut state = state_rc.borrow_mut();
 
     match event {
         Event::Create(global, obj) => match obj.thing {
             Type::Node(name) => {
-                if cfg_by_name.contains_key(name.as_str()) {
+                if cfg_by_name.all.contains(name.as_str()) {
                     let name_copy = name.clone();
                     state.relevant_nodes.insert(obj.id, NodeData { name, id: obj.id, ports: Vec::new() });
                     state.node_by_name.insert(name_copy, obj.id);
@@ -157,35 +174,38 @@ fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>,
                 let mut push = false;
                 if let Some(parent) = state.relevant_nodes.get(&port.node) {
                     push = true;
-                    let (cfg, other_name) = cfg_by_name.get(parent.name.as_str()).unwrap();
-                    // check if the direction of this port is the direction that we configured for
-                    if port.direction == Direction::IN && cfg.input != parent.name {
-                        return;
-                    }
-                    if port.direction == Direction::OUT && cfg.output != parent.name {
-                        return;
-                    }
-
-                    if let Some(other_node) = state.node_by_name.get(other_name) {
-                        if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter().find(|p| p.channel == port.channel && p.direction != port.direction)
-                        {
-                            if port.direction != other_port.direction {
-                                println!("trying to create link");
-                                let link = if port.direction == Direction::IN {
-                                    create_link(core, &port, other_port)
-                                } else {
-                                    create_link(core, other_port, &port)
-                                };
-                                let local_id = link.upcast_ref().id();
-                                let state_copy = state_rc.clone();
-                                let listener = link.add_listener_local()
-                                    .info(move |info| {
-                                        let mut state = state_copy.borrow_mut();
-                                        state.created_links.insert(info.id());
-                                        state.temp_links.retain(|(l, _)| l.upcast_ref().id() != local_id);
-                                    })
-                                    .register();
-                                state.temp_links.push((link, listener));
+                    if let Some((output_name, input_name)) = cfg_by_name.connect.get(parent.name.as_str()) {
+                        // check if the direction of this port is the direction that we configured for
+                        if port.direction == Direction::IN && parent.name != *input_name {
+                            return;
+                        }
+                        // is this necessary?
+                        if port.direction == Direction::OUT && parent.name != *output_name {
+                            return;
+                        }
+                        let other_name: &str = if port.direction == Direction::IN { &output_name } else { &input_name };
+                        if let Some(other_node) = state.node_by_name.get(other_name) {
+                            if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter()
+                                .find(|p| p.channel == port.channel && p.direction != port.direction)
+                            {
+                                if port.direction != other_port.direction {
+                                    println!("trying to create link");
+                                    let link = if port.direction == Direction::IN {
+                                        create_link(core, &port, other_port)
+                                    } else {
+                                        create_link(core, other_port, &port)
+                                    };
+                                    let local_id = link.upcast_ref().id();
+                                    let state_copy = state_rc.clone();
+                                    let listener = link.add_listener_local()
+                                        .info(move |info| {
+                                            let mut state = state_copy.borrow_mut();
+                                            state.created_links.insert(info.id());
+                                            state.temp_links.retain(|(l, _)| l.upcast_ref().id() != local_id);
+                                        })
+                                        .register();
+                                    state.temp_links.push((link, listener));
+                                }
                             }
                         }
                     }
@@ -200,13 +220,22 @@ fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>,
                     return;
                 }
                 if let Some(node_in) = state.relevant_nodes.get(&link.node_in) {
-                    if let Some((cfg, other_name)) = cfg_by_name.get(node_in.name.as_str()) {
-                        if cfg.replace && node_in.name == cfg.input {
-                            println!("trying to delete {}", global.id);
+                    if let Some(name) = cfg_by_name.delete_in.get(node_in.name.as_str()) {
+                        if node_in.name == *name {
+                            //println!("trying to delete {}", global.id);
                             registry.destroy_global(global.id);
                        }
                     }
                 }
+                if let Some(node_out) = state.relevant_nodes.get(&link.node_out) {
+                    if let Some(name) = cfg_by_name.delete_out.get(node_out.name.as_str()) {
+                        if node_out.name == *name {
+                            //println!("trying to delete {}", global.id);
+                            registry.destroy_global(global.id);
+                        }
+                    }
+                }
+
             }
         },
         Event::Delete(id) => {
@@ -230,7 +259,7 @@ fn unwrap_arr<const N: usize, T>(arr: [Option<T>; N]) -> Option<[T; N]> {
     return Some(arr.map(|x| unsafe { x.unwrap_unchecked() }));
 }
 
-fn listener_thread(cfg: HashMap<String, (LinkCfg, String)>) {
+fn listener_thread(cfg: ConfigCache) {
     let mainloop = pw::MainLoop::new().expect("Failed to create MainLoop for listener thread");
     let context = pw::Context::new(&mainloop).expect("Failed to create PipeWire Context");
     let core = context
