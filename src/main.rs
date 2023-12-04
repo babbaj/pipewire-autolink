@@ -1,5 +1,6 @@
 use std::cell::{RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ops::DerefMut;
 use std::process::exit;
 use std::rc::Rc;
 use clap::{Arg, ArgAction, Command};
@@ -8,7 +9,7 @@ use pipewire as pw;
 use pw::prelude::*;
 use pw::types::ObjectType;
 use pipewire::proxy::ProxyT;
-use pipewire::registry::{GlobalObject, Registry};
+use pipewire::registry::{Registry};
 use pipewire::spa::{ForeignDict, ParsableValue};
 
 #[derive(Debug, Default)]
@@ -17,14 +18,6 @@ struct ConfigCache {
     delete_in: HashSet<String>,
     delete_out: HashSet<String>,
     all_names: HashSet<String>
-}
-
-#[derive(Debug)]
-struct Link {
-    port_in: u32,
-    port_out: u32,
-    node_in: u32,
-    node_out: u32
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -40,24 +33,6 @@ struct Port {
     direction: Direction
 }
 
-#[derive(Debug)]
-enum Type {
-    Node(String),
-    Link(Link),
-    Port(Port)
-}
-
-#[derive(Debug)]
-struct Object {
-    id: u32,
-    thing: Type
-}
-
-#[derive(Debug)]
-enum Event<'a> {
-    Create(&'a GlobalObject<ForeignDict>, Object),
-    Delete(u32)
-}
 
 fn parse_cmdline() -> (Command, ConfigCache) {
     let link = Arg::new("connect")
@@ -103,7 +78,7 @@ fn parse_cmdline() -> (Command, ConfigCache) {
 #[derive(Debug)]
 struct NodeData {
     name: String,
-    id: u32,
+    _id: u32,
     ports: Vec<Port>
 }
 
@@ -140,85 +115,78 @@ struct State {
     temp_links: Vec<(pw::link::Link, pw::link::LinkListener)>
 }
 
-fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>, cfg_by_name: &ConfigCache, event: Event) {
-    //println!("{:?}", &event);
+fn on_delete(id: u32, state: &mut State) {
+    if let Some(data) = state.relevant_nodes.remove(&id) {
+        state.node_by_name.remove(&data.name);
+    }
+    state.created_links.remove(&id);
+}
+
+fn on_new_node(name: String, id: u32, cfg: &ConfigCache, state: &mut State) {
+    if cfg.all_names.contains(name.as_str()) {
+        let name_copy = name.clone();
+        state.relevant_nodes.insert(id, NodeData { name, _id: id, ports: Vec::new() });
+        state.node_by_name.insert(name_copy, id);
+    }
+}
+
+fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, core: &pw::Core) {
+    let mut push = false;
     let mut state = state_rc.borrow_mut();
-
-    match event {
-        Event::Create(global, obj) => match obj.thing {
-            Type::Node(name) => {
-                if cfg_by_name.all_names.contains(name.as_str()) {
-                    let name_copy = name.clone();
-                    state.relevant_nodes.insert(obj.id, NodeData { name, id: obj.id, ports: Vec::new() });
-                    state.node_by_name.insert(name_copy, obj.id);
-                }
-            },
-            Type::Port(port) => {
-                // borrow checker reeee
-                let mut push = false;
-                if let Some(parent) = state.relevant_nodes.get(&port.node) {
-                    push = true;
-                    if let Some((other_name, other_dir)) = cfg_by_name.connect.get(parent.name.as_str()) {
-                        // check if the direction of this port is the direction that we configured for
-                        if port.direction == *other_dir {
-                            return;
-                        }
-
-                        if let Some(other_node) = state.node_by_name.get(other_name) {
-                            if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter()
-                                .find(|p| p.channel == port.channel && p.direction != port.direction)
-                            {
-                                if port.direction != other_port.direction {
-                                    println!("trying to create link");
-                                    let link = if port.direction == Direction::IN {
-                                        create_link(core, &port, other_port)
-                                    } else {
-                                        create_link(core, other_port, &port)
-                                    };
-                                    let local_id = link.upcast_ref().id();
-                                    let state_copy = state_rc.clone();
-                                    let listener = link.add_listener_local()
-                                        .info(move |info| {
-                                            let mut state = state_copy.borrow_mut();
-                                            state.created_links.insert(info.id());
-                                            state.temp_links.retain(|(l, _)| l.upcast_ref().id() != local_id);
-                                        })
-                                        .register();
-                                    state.temp_links.push((link, listener));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if push {
-                    state.relevant_nodes.get_mut(&port.node).unwrap().ports.push(port);
-                }
-            },
-            Type::Link(link) => {
-                if state.created_links.contains(&obj.id) {
-                    return;
-                }
-                if let Some(node_in) = state.relevant_nodes.get(&link.node_in) {
-                    if cfg_by_name.delete_in.contains(node_in.name.as_str()) {
-                        //println!("trying to delete {}", global.id);
-                        registry.destroy_global(global.id);
-                    }
-                }
-                if let Some(node_out) = state.relevant_nodes.get(&link.node_out) {
-                    if cfg_by_name.delete_out.contains(node_out.name.as_str()) {
-                        //println!("trying to delete {}", global.id);
-                        registry.destroy_global(global.id);
-                    }
-                }
-
+    if let Some(parent) = state.relevant_nodes.get(&port.node) {
+        push = true;
+        if let Some((other_name, other_dir)) = config.connect.get(parent.name.as_str()) {
+            // check if the direction of this port is the direction that we configured for
+            if port.direction == *other_dir {
+                return;
             }
-        },
-        Event::Delete(id) => {
-            if let Some(data) = state.relevant_nodes.remove(&id) {
-                state.node_by_name.remove(&data.name);
+
+            if let Some(other_node) = state.node_by_name.get(other_name) {
+                if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter()
+                    .find(|p| p.channel == port.channel && p.direction != port.direction)
+                {
+                    if port.direction != other_port.direction {
+                        println!("trying to create link");
+                        let link = if port.direction == Direction::IN {
+                            create_link(core, &port, other_port)
+                        } else {
+                            create_link(core, other_port, &port)
+                        };
+                        let local_id = link.upcast_ref().id();
+                        let state_copy = state_rc.clone();
+                        let listener = link.add_listener_local()
+                            .info(move |info| {
+                                let mut state = state_copy.borrow_mut();
+                                state.created_links.insert(info.id());
+                                state.temp_links.retain(|(l, _)| l.upcast_ref().id() != local_id);
+                            })
+                            .register();
+                        state.temp_links.push((link, listener));
+                    }
+                }
             }
-            state.created_links.remove(&id);
+        }
+    }
+
+    if push {
+        state.relevant_nodes.get_mut(&port.node).unwrap().ports.push(port);
+    }
+}
+
+fn on_new_link(node_in: u32, node_out: u32, id: u32, state: &mut State, config: &ConfigCache, registry: &Registry) {
+    if state.created_links.contains(&id) {
+        return;
+    }
+    if let Some(node_in) = state.relevant_nodes.get(&node_in) {
+        if config.delete_in.contains(node_in.name.as_str()) {
+            //println!("trying to delete {}", global.id);
+            registry.destroy_global(id);
+        }
+    }
+    if let Some(node_out) = state.relevant_nodes.get(&node_out) {
+        if config.delete_out.contains(node_out.name.as_str()) {
+            //println!("trying to delete {}", global.id);
+            registry.destroy_global(id);
         }
     }
 }
@@ -246,10 +214,7 @@ fn listener_thread(cfg: ConfigCache) {
     let state2 = state.clone();
 
     let registry2 = registry.clone();
-    let registry3 = registry.clone();
-    let core2 = core.clone();
     let cfg1 = Rc::new(cfg);
-    let cfg2 = cfg1.clone();
     let _listener = registry
         .add_listener_local()
         .global(move |global| {
@@ -259,25 +224,24 @@ fn listener_thread(cfg: ConfigCache) {
             match global.type_ {
                 ObjectType::Node => {
                     if let Some(name) = props.get("node.name") {
-                        let obj = Object{id, thing: Type::Node(name.to_owned())};
-                        on_event(&core, &registry2, &state, &cfg1, Event::Create(global, obj));
+                        on_new_node(name.to_owned(), global.id, &cfg1, state.borrow_mut().deref_mut());
                     }
                 },
                 ObjectType::Port => {
                     if let Some([node_id, channel, dir_str]) = get_props(props, ["node.id", "audio.channel", "port.direction"]) {
+
                         if let Some(node) = u32::parse_value(node_id) {
                             let direction = if dir_str == "in" { Direction::IN } else { Direction::OUT };
-                            let obj = Object{id, thing: Type::Port(Port{id, node, channel: channel.to_owned(), direction})};
-                            on_event(&core, &registry2, &state, &cfg1, Event::Create(global, obj));
+                            let port = Port{id, node, channel: channel.to_owned(), direction};
+                            on_new_port(port, &state, &cfg1, &core);
                         }
                     }
                 },
                 ObjectType::Link => {
-                    if let Some(vals) = get_props(props, ["link.output.port", "link.input.port", "link.output.node", "link.input.node"]) {
+                    if let Some(vals) = get_props(props, ["link.input.node", "link.output.node"]) {
                         let ids = vals.map(u32::parse_value);
-                        if let Some([pout, pin, nout, nin]) = unwrap_arr(ids) {
-                            let obj = Object{ id, thing: Type::Link(Link{port_in: pin, port_out: pout, node_in: nin, node_out: nout})};
-                            on_event(&core, &registry2,  &state, &cfg1, Event::Create(global, obj));
+                        if let Some([node_in, node_out]) = unwrap_arr(ids) {
+                            on_new_link(node_in, node_out, id, state.borrow_mut().deref_mut(), &cfg1, &registry2);
                         }
                     }
                 },
@@ -285,7 +249,7 @@ fn listener_thread(cfg: ConfigCache) {
             }
         })
         .global_remove(move |id| {
-            on_event(&core2, &registry3, &state2, &cfg2, Event::Delete(id));
+            on_delete(id, state2.borrow_mut().deref_mut());
         })
         .register();
 

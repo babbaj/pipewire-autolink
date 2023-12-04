@@ -17,10 +17,6 @@
       packages = with pkgs; [
         pkg-config
         pipewire.dev
-        libinput.dev
-        openssl.dev
-        #ffmpeg.dev
-        lame
       ];
     };
   };
