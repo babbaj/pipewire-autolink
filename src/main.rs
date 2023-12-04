@@ -2,7 +2,6 @@ use std::cell::{RefCell};
 use std::collections::{HashMap, HashSet};
 use std::process::exit;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use clap::{Arg, Command};
 
 use pipewire as pw;
@@ -15,9 +14,9 @@ use pipewire::spa::{ForeignDict, ParsableValue};
 #[derive(Debug, Default)]
 struct ConfigCache {
     connect: HashMap<String, (String, String)>,
-    delete_in: HashMap<String, String>,
-    delete_out: HashMap<String, String>,
-    all: HashSet<String>
+    delete_in: HashSet<String>,
+    delete_out: HashSet<String>,
+    all_names: HashSet<String>
 }
 
 #[derive(Debug)]
@@ -87,15 +86,15 @@ fn parse_cmdline() -> (Command, ConfigCache) {
         });
     matches.get_many::<String>("delete-in").unwrap_or(Default::default())
         .for_each(|name| {
-            config.delete_in.insert(name.clone(), name.clone());
+            config.delete_in.insert(name.clone());
         });
 
     matches.get_many::<String>("delete-out").unwrap_or(Default::default())
         .for_each(|name| {
-            config.delete_out.insert(name.clone(), name.clone());
+            config.delete_out.insert(name.clone());
         });
-    config.connect.keys().chain(config.delete_in.keys()).chain(config.delete_out.keys()).for_each(|name| {
-        config.all.insert(name.clone());
+    config.connect.keys().chain(config.delete_in.iter()).chain(config.delete_out.iter()).for_each(|name| {
+        config.all_names.insert(name.clone());
     });
 
     return (cmd_clone, config);
@@ -125,7 +124,7 @@ fn create_link(core: &pw::Core, pin: &Port, pout: &Port) -> pw::link::Link {
 
 fn main() {
     let (mut command, config) = parse_cmdline();
-    if config.all.is_empty() {
+    if config.all_names.is_empty() {
         command.print_long_help().unwrap();
         exit(1);
     }
@@ -148,7 +147,7 @@ fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>,
     match event {
         Event::Create(global, obj) => match obj.thing {
             Type::Node(name) => {
-                if cfg_by_name.all.contains(name.as_str()) {
+                if cfg_by_name.all_names.contains(name.as_str()) {
                     let name_copy = name.clone();
                     state.relevant_nodes.insert(obj.id, NodeData { name, id: obj.id, ports: Vec::new() });
                     state.node_by_name.insert(name_copy, obj.id);
@@ -206,18 +205,14 @@ fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>,
                 }
                 if let Some(node_in) = state.relevant_nodes.get(&link.node_in) {
                     if let Some(name) = cfg_by_name.delete_in.get(node_in.name.as_str()) {
-                        if node_in.name == *name {
-                            //println!("trying to delete {}", global.id);
-                            registry.destroy_global(global.id);
-                       }
+                        //println!("trying to delete {}", global.id);
+                        registry.destroy_global(global.id);
                     }
                 }
                 if let Some(node_out) = state.relevant_nodes.get(&link.node_out) {
                     if let Some(name) = cfg_by_name.delete_out.get(node_out.name.as_str()) {
-                        if node_out.name == *name {
-                            //println!("trying to delete {}", global.id);
-                            registry.destroy_global(global.id);
-                        }
+                        //println!("trying to delete {}", global.id);
+                        registry.destroy_global(global.id);
                     }
                 }
 
@@ -257,8 +252,7 @@ fn listener_thread(cfg: ConfigCache) {
     let registry2 = registry.clone();
     let registry3 = registry.clone();
     let core2 = core.clone();
-    //let vec_copy = out.clone();
-    let cfg1 = Arc::new(cfg);
+    let cfg1 = Rc::new(cfg);
     let cfg2 = cfg1.clone();
     let _listener = registry
         .add_listener_local()
