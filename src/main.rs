@@ -59,7 +59,6 @@ enum Event<'a> {
     Delete(u32)
 }
 
-
 fn parse_cmdline() -> (Command, ConfigCache) {
     let link = Arg::new("connect")
         .long("connect")
@@ -77,22 +76,18 @@ fn parse_cmdline() -> (Command, ConfigCache) {
     let cmd_clone = cmd.clone();
     let matches = cmd.get_matches();
 
-    let mut config = ConfigCache::default();
-    matches.get_many::<String>("connect").unwrap_or(Default::default())
-        .map(|s| (s.split_once(',').expect("connect arguments must be comma separated pairs")))
-        .for_each(|(output, input)| {
-            config.connect.insert(output.to_owned(), (input.to_owned(), Direction::IN));
-            config.connect.insert(input.to_owned(), (output.to_owned(), Direction::OUT));
-        });
-    matches.get_many::<String>("delete-in").unwrap_or(Default::default())
-        .for_each(|name| {
-            config.delete_in.insert(name.clone());
-        });
-
-    matches.get_many::<String>("delete-out").unwrap_or(Default::default())
-        .for_each(|name| {
-            config.delete_out.insert(name.clone());
-        });
+    let mut config = ConfigCache {
+        connect: matches.get_many::<String>("connect").unwrap_or(Default::default())
+          .map(|s| (s.split_once(',').expect("connect arguments must be comma separated pairs")))
+          .flat_map(|(output, input)| [
+              (output.to_owned(), (input.to_owned(), Direction::IN)),
+              (input.to_owned(), (output.to_owned(), Direction::OUT))
+          ])
+          .collect(),
+        delete_in: matches.get_many::<String>("delete-in").unwrap_or_default().cloned().collect(),
+        delete_out: matches.get_many::<String>("delete-out").unwrap_or_default().cloned().collect(),
+        all_names: Default::default()
+    };
     config.connect.keys().chain(config.delete_in.iter()).chain(config.delete_out.iter()).for_each(|name| {
         config.all_names.insert(name.clone());
     });
