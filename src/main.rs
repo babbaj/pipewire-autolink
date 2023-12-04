@@ -12,14 +12,6 @@ use pipewire::proxy::ProxyT;
 use pipewire::registry::{GlobalObject, Registry};
 use pipewire::spa::{ForeignDict, ParsableValue};
 
-#[derive(Clone)]
-enum LinkCfg {
-    // (output, input)
-    Connect(String, String),
-    DeleteIn(String),
-    DeleteOut(String)
-}
-
 #[derive(Debug, Default)]
 struct ConfigCache {
     connect: HashMap<String, (String, String)>,
@@ -69,7 +61,7 @@ enum Event<'a> {
 }
 
 
-fn parse_cmdline() -> (Command, Vec<LinkCfg>) {
+fn parse_cmdline() -> (Command, ConfigCache) {
     let link = Arg::new("connect")
         .long("connect")
         .help("Connect a node's output to another node's input (output,input)");
@@ -86,15 +78,27 @@ fn parse_cmdline() -> (Command, Vec<LinkCfg>) {
     let cmd_clone = cmd.clone();
     let matches = cmd.get_matches();
 
-    let connects = matches.get_many::<String>("connect").unwrap_or(Default::default())
+    let mut config = ConfigCache::default();
+    matches.get_many::<String>("connect").unwrap_or(Default::default())
         .map(|s| (s.split_once(',').expect("connect arguments must be comma separated pairs")))
-        .map(|(output, input)| LinkCfg::Connect(output.to_owned(), input.to_owned()));
-    let delete_ins = matches.get_many::<String>("delete-in").unwrap_or(Default::default())
-        .map(|s| LinkCfg::DeleteIn(s.to_owned()));
-    let delete_outs = matches.get_many::<String>("delete-out").unwrap_or(Default::default())
-        .map(|s| LinkCfg::DeleteOut(s.to_owned()));
+        .for_each(|(output, input)| {
+            config.connect.insert(output.to_owned(), (output.to_owned(), input.to_owned()));
+            config.connect.insert(input.to_owned(), (output.to_owned(), input.to_owned()));
+        });
+    matches.get_many::<String>("delete-in").unwrap_or(Default::default())
+        .for_each(|name| {
+            config.delete_in.insert(name.clone(), name.clone());
+        });
 
-    return (cmd_clone, connects.chain(delete_ins).chain(delete_outs).collect());
+    matches.get_many::<String>("delete-out").unwrap_or(Default::default())
+        .for_each(|name| {
+            config.delete_out.insert(name.clone(), name.clone());
+        });
+    config.connect.keys().chain(config.delete_in.keys()).chain(config.delete_out.keys()).for_each(|name| {
+        config.all.insert(name.clone());
+    });
+
+    return (cmd_clone, config);
 }
 
 #[derive(Debug)]
@@ -120,32 +124,13 @@ fn create_link(core: &pw::Core, pin: &Port, pout: &Port) -> pw::link::Link {
 }
 
 fn main() {
-    let (mut command, cfgs) = parse_cmdline();
-    if cfgs.is_empty() {
+    let (mut command, config) = parse_cmdline();
+    if config.all.is_empty() {
         command.print_long_help().unwrap();
         exit(1);
     }
-    let mut by_name = ConfigCache::default();
-    for cfg in cfgs {
-        match cfg {
-            LinkCfg::Connect(output, input) => {
-                by_name.connect.insert(output.clone(), (output.clone(), input.clone()));
-                by_name.connect.insert(input.clone(), (output.clone(), input.clone()));
-                by_name.all.insert(input.clone());
-                by_name.all.insert(output.clone());
-            },
-            LinkCfg::DeleteIn(name) => {
-                by_name.delete_in.insert(name.clone(), name.clone());
-                by_name.all.insert(name);
-            },
-            LinkCfg::DeleteOut(name) => {
-                by_name.delete_out.insert(name.clone(), name.clone());
-                by_name.all.insert(name);
-            }
-        }
-    }
 
-    listener_thread(by_name);
+    listener_thread(config);
 }
 
 #[derive(Default)]
