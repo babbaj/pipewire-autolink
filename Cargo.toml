@@ -1,0 +1,12 @@
+[package]
+name = "pw-autolink"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+pipewire = { version = "0.7.2", features = ["v0_3_77"] }
+pipewire-sys = "0.7.2"
+libspa-sys = "0.7.2"
+clap = "4.4.8"
