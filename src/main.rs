@@ -2,7 +2,7 @@ use std::cell::{RefCell};
 use std::collections::{HashMap, HashSet};
 use std::process::exit;
 use std::rc::Rc;
-use clap::{Arg, Command};
+use clap::{Arg, ArgAction, Command};
 
 use pipewire as pw;
 use pw::prelude::*;
@@ -62,6 +62,8 @@ enum Event<'a> {
 fn parse_cmdline() -> (Command, ConfigCache) {
     let link = Arg::new("connect")
         .long("connect")
+        .action(ArgAction::Append)
+        .num_args(2)
         .help("Connect a node's output to another node's input (output,input)");
     let delete_in = Arg::new("delete-in")
         .long("delete-in")
@@ -75,13 +77,13 @@ fn parse_cmdline() -> (Command, ConfigCache) {
         .arg(delete_out);
     let cmd_clone = cmd.clone();
     let matches = cmd.get_matches();
+    let connects = matches.get_occurrences::<String>("connect").unwrap_or_default()
+        .map(|mut it| (it.next().unwrap(), it.next().unwrap()));
 
     let mut config = ConfigCache {
-        connect: matches.get_many::<String>("connect").unwrap_or(Default::default())
-          .map(|s| (s.split_once(',').expect("connect arguments must be comma separated pairs")))
-          .flat_map(|(output, input)| [
-              (output.to_owned(), (input.to_owned(), Direction::IN)),
-              (input.to_owned(), (output.to_owned(), Direction::OUT))
+        connect: connects.flat_map(|(output, input)| [
+              (output.clone(), (input.clone(), Direction::IN)),
+              (input.clone(), (output.clone(), Direction::OUT))
           ])
           .collect(),
         delete_in: matches.get_many::<String>("delete-in").unwrap_or_default().cloned().collect(),
