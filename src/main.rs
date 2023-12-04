@@ -64,13 +64,16 @@ fn parse_cmdline() -> (Command, ConfigCache) {
         .long("connect")
         .action(ArgAction::Append)
         .num_args(2)
-        .help("Connect a node's output to another node's input (output,input)");
+        .value_names(["output", "input"])
+        .help("Link a node's output ports to another node's input ports");
     let delete_in = Arg::new("delete-in")
         .long("delete-in")
+        .value_name("node.name")
         .help("Delete links from this node's input (links created by autolink are not deleted)");
     let delete_out = Arg::new("delete-out")
         .long("delete-out")
-        .help("Like delete-in but the output");
+        .value_name("node.name")
+        .help("Like delete-in but deletes the output");
     let cmd = Command::new("pw-autolink")
         .arg(link)
         .arg(delete_in)
