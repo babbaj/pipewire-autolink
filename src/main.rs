@@ -13,7 +13,7 @@ use pipewire::spa::{ForeignDict, ParsableValue};
 
 #[derive(Debug, Default)]
 struct ConfigCache {
-    connect: HashMap<String, (String, String)>,
+    connect: HashMap<String, (String, Direction)>,
     delete_in: HashSet<String>,
     delete_out: HashSet<String>,
     all_names: HashSet<String>
@@ -81,8 +81,8 @@ fn parse_cmdline() -> (Command, ConfigCache) {
     matches.get_many::<String>("connect").unwrap_or(Default::default())
         .map(|s| (s.split_once(',').expect("connect arguments must be comma separated pairs")))
         .for_each(|(output, input)| {
-            config.connect.insert(output.to_owned(), (output.to_owned(), input.to_owned()));
-            config.connect.insert(input.to_owned(), (output.to_owned(), input.to_owned()));
+            config.connect.insert(output.to_owned(), (input.to_owned(), Direction::IN));
+            config.connect.insert(input.to_owned(), (output.to_owned(), Direction::OUT));
         });
     matches.get_many::<String>("delete-in").unwrap_or(Default::default())
         .for_each(|name| {
@@ -158,16 +158,12 @@ fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>,
                 let mut push = false;
                 if let Some(parent) = state.relevant_nodes.get(&port.node) {
                     push = true;
-                    if let Some((output_name, input_name)) = cfg_by_name.connect.get(parent.name.as_str()) {
+                    if let Some((other_name, other_dir)) = cfg_by_name.connect.get(parent.name.as_str()) {
                         // check if the direction of this port is the direction that we configured for
-                        if port.direction == Direction::IN && parent.name != *input_name {
+                        if port.direction == *other_dir {
                             return;
                         }
-                        // is this necessary?
-                        if port.direction == Direction::OUT && parent.name != *output_name {
-                            return;
-                        }
-                        let other_name: &str = if port.direction == Direction::IN { &output_name } else { &input_name };
+
                         if let Some(other_node) = state.node_by_name.get(other_name) {
                             if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter()
                                 .find(|p| p.channel == port.channel && p.direction != port.direction)
@@ -204,13 +200,13 @@ fn on_event(core: &pw::Core, registry: &Registry, state_rc: &Rc<RefCell<State>>,
                     return;
                 }
                 if let Some(node_in) = state.relevant_nodes.get(&link.node_in) {
-                    if let Some(name) = cfg_by_name.delete_in.get(node_in.name.as_str()) {
+                    if cfg_by_name.delete_in.contains(node_in.name.as_str()) {
                         //println!("trying to delete {}", global.id);
                         registry.destroy_global(global.id);
                     }
                 }
                 if let Some(node_out) = state.relevant_nodes.get(&link.node_out) {
-                    if let Some(name) = cfg_by_name.delete_out.get(node_out.name.as_str()) {
+                    if cfg_by_name.delete_out.contains(node_out.name.as_str()) {
                         //println!("trying to delete {}", global.id);
                         registry.destroy_global(global.id);
                     }
