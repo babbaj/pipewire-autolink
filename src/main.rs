@@ -130,10 +130,8 @@ fn on_new_node(name: String, id: u32, cfg: &ConfigCache, state: &mut State) {
 }
 
 fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, core: &pw::Core) {
-    let mut push = false;
     let mut state = state_rc.borrow_mut();
     if let Some(parent) = state.relevant_nodes.get(&port.node) {
-        push = true;
         if let Some((other_name, other_dir)) = config.connect.get(parent.name.as_str()) {
             // If this port is the same direction as the port we're trying to link to we have the wrong port
             if port.direction == *other_dir {
@@ -164,9 +162,7 @@ fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, 
                 }
             }
         }
-    }
-
-    if push {
+        // it doesn't seem to be possible to avoid this unnecessary get without intrusive changes
         state.relevant_nodes.get_mut(&port.node).unwrap().ports.push(port);
     }
 }
