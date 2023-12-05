@@ -14,7 +14,7 @@ use pipewire::spa::{ForeignDict, ParsableValue};
 
 #[derive(Debug, Default)]
 struct ConfigCache {
-    connect: HashMap<String, (String, Direction)>,
+    connect: HashMap<String, HashMap<String, Direction>>,
     delete_in: HashSet<String>,
     delete_out: HashSet<String>,
     all_names: HashSet<String>
@@ -58,12 +58,17 @@ fn parse_cmdline() -> (Command, ConfigCache) {
     let connects = matches.get_occurrences::<String>("connect").unwrap_or_default()
         .map(|mut it| (it.next().unwrap(), it.next().unwrap()));
 
+    let mut connections = HashMap::<String, HashMap<String, Direction>>::new();
+    connects.flat_map(|(output, input)| [
+            (output.clone(), (input.clone(), Direction::IN)),
+            (input.clone(), (output.clone(), Direction::OUT))
+        ])
+        .for_each(|(from, (to, dir))| {
+            connections.entry(from).or_default().insert(to, dir);
+        });
+
     let mut config = ConfigCache {
-        connect: connects.flat_map(|(output, input)| [
-              (output.clone(), (input.clone(), Direction::IN)),
-              (input.clone(), (output.clone(), Direction::OUT))
-          ])
-          .collect(),
+        connect: connections,
         delete_in: matches.get_many::<String>("delete-in").unwrap_or_default().cloned().collect(),
         delete_out: matches.get_many::<String>("delete-out").unwrap_or_default().cloned().collect(),
         all_names: Default::default()
@@ -132,35 +137,39 @@ fn on_new_node(name: String, id: u32, cfg: &ConfigCache, state: &mut State) {
 fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, core: &pw::Core) {
     let mut state = state_rc.borrow_mut();
     if let Some(parent) = state.relevant_nodes.get(&port.node) {
-        if let Some((other_name, other_dir)) = config.connect.get(parent.name.as_str()) {
-            // If this port is the same direction as the port we're trying to link to we have the wrong port
-            if port.direction == *other_dir {
-                return;
-            }
+        if let Some(connections) = config.connect.get(parent.name.as_str()) {
+            let mut temp_links = Vec::new(); // make the bc happy (a RefCell for each member of State might work)
+            for (other_name, other_dir) in connections {
+                // If this port is the same direction as the port we're trying to link to we have the wrong port
+                if port.direction == *other_dir {
+                    return;
+                }
 
-            if let Some(other_node) = state.node_by_name.get(other_name) {
-                if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter()
-                    .find(|p| p.channel == port.channel && p.direction != port.direction)
-                {
-                    let link = if port.direction == Direction::IN {
-                        println!("Creating link from {} to {} ({})", parent.name, other_name, port.channel);
-                        create_link(core, &port, other_port)
-                    } else {
-                        println!("Creating link from {} to {} ({})", other_name, parent.name, port.channel);
-                        create_link(core, other_port, &port)
-                    };
-                    let local_id = link.upcast_ref().id();
-                    let state_copy = state_rc.clone();
-                    let listener = link.add_listener_local()
-                        .info(move |info| {
-                            let mut state = state_copy.borrow_mut();
-                            state.created_links.insert(info.id());
-                            state.temp_links.retain(|(l, _)| l.upcast_ref().id() != local_id);
-                        })
-                        .register();
-                    state.temp_links.push((link, listener));
+                if let Some(other_node) = state.node_by_name.get(other_name) {
+                    if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter()
+                        .find(|p| p.channel == port.channel && p.direction != port.direction)
+                    {
+                        let link = if port.direction == Direction::IN {
+                            println!("Creating link from {} to {} ({})", parent.name, other_name, port.channel);
+                            create_link(core, &port, other_port)
+                        } else {
+                            println!("Creating link from {} to {} ({})", other_name, parent.name, port.channel);
+                            create_link(core, other_port, &port)
+                        };
+                        let local_id = link.upcast_ref().id();
+                        let state_copy = state_rc.clone();
+                        let listener = link.add_listener_local()
+                            .info(move |info| {
+                                let mut state = state_copy.borrow_mut();
+                                state.created_links.insert(info.id());
+                                state.temp_links.retain(|(l, _)| l.upcast_ref().id() != local_id);
+                            })
+                            .register();
+                        temp_links.push((link, listener));
+                    }
                 }
             }
+            state.temp_links.append(&mut temp_links);
         }
         // it doesn't seem to be possible to avoid this unnecessary get without intrusive changes
         state.relevant_nodes.get_mut(&port.node).unwrap().ports.push(port);
