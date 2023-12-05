@@ -366,6 +366,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pipewire-autolink"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libspa-sys",
+ "pipewire",
+ "pipewire-sys",
+]
+
+[[package]]
 name = "pipewire-sys"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -389,16 +399,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39278fbbf5fb4f646ce651690877f89d1c5811a3d4acb27700c1cb3cdb78fd3b"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "pw-autolink"
-version = "0.1.0"
-dependencies = [
- "clap",
- "libspa-sys",
- "pipewire",
- "pipewire-sys",
 ]
 
 [[package]]

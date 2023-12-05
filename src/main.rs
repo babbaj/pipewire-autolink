@@ -49,7 +49,7 @@ fn parse_cmdline() -> (Command, ConfigCache) {
         .long("delete-out")
         .value_name("node.name")
         .help("Like delete-in but deletes the output");
-    let cmd = Command::new("pw-autolink")
+    let cmd = Command::new("pipewire-autolink")
         .arg(link)
         .arg(delete_in)
         .arg(delete_out);
