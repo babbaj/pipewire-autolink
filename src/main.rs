@@ -103,7 +103,6 @@ fn main() {
         command.print_long_help().unwrap();
         exit(1);
     }
-
     listener_thread(config);
 }
 
@@ -136,7 +135,7 @@ fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, 
     if let Some(parent) = state.relevant_nodes.get(&port.node) {
         push = true;
         if let Some((other_name, other_dir)) = config.connect.get(parent.name.as_str()) {
-            // check if the direction of this port is the direction that we configured for
+            // If this port is the same direction as the port we're trying to link to we have the wrong port
             if port.direction == *other_dir {
                 return;
             }
@@ -145,24 +144,23 @@ fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, 
                 if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter()
                     .find(|p| p.channel == port.channel && p.direction != port.direction)
                 {
-                    if port.direction != other_port.direction {
-                        println!("trying to create link");
-                        let link = if port.direction == Direction::IN {
-                            create_link(core, &port, other_port)
-                        } else {
-                            create_link(core, other_port, &port)
-                        };
-                        let local_id = link.upcast_ref().id();
-                        let state_copy = state_rc.clone();
-                        let listener = link.add_listener_local()
-                            .info(move |info| {
-                                let mut state = state_copy.borrow_mut();
-                                state.created_links.insert(info.id());
-                                state.temp_links.retain(|(l, _)| l.upcast_ref().id() != local_id);
-                            })
-                            .register();
-                        state.temp_links.push((link, listener));
-                    }
+                    let link = if port.direction == Direction::IN {
+                        println!("Creating link from {} to {} ({})", parent.name, other_name, port.channel);
+                        create_link(core, &port, other_port)
+                    } else {
+                        println!("Creating link from {} to {} ({})", other_name, parent.name, port.channel);
+                        create_link(core, other_port, &port)
+                    };
+                    let local_id = link.upcast_ref().id();
+                    let state_copy = state_rc.clone();
+                    let listener = link.add_listener_local()
+                        .info(move |info| {
+                            let mut state = state_copy.borrow_mut();
+                            state.created_links.insert(info.id());
+                            state.temp_links.retain(|(l, _)| l.upcast_ref().id() != local_id);
+                        })
+                        .register();
+                    state.temp_links.push((link, listener));
                 }
             }
         }
@@ -178,14 +176,14 @@ fn on_new_link(node_in: u32, node_out: u32, id: u32, state: &mut State, config: 
         return;
     }
     if let Some(node_in) = state.relevant_nodes.get(&node_in) {
-        if config.delete_in.contains(node_in.name.as_str()) {
-            //println!("trying to delete {}", global.id);
+        if config.delete_in.contains(&node_in.name) {
+            println!("Deleting input link from {}", node_in.name);
             registry.destroy_global(id);
         }
     }
     if let Some(node_out) = state.relevant_nodes.get(&node_out) {
-        if config.delete_out.contains(node_out.name.as_str()) {
-            //println!("trying to delete {}", global.id);
+        if config.delete_out.contains(&node_out.name) {
+            println!("Deleting output link from {}", node_out.name);
             registry.destroy_global(id);
         }
     }
@@ -229,7 +227,6 @@ fn listener_thread(cfg: ConfigCache) {
                 },
                 ObjectType::Port => {
                     if let Some([node_id, channel, dir_str]) = get_props(props, ["node.id", "audio.channel", "port.direction"]) {
-
                         if let Some(node) = u32::parse_value(node_id) {
                             let direction = if dir_str == "in" { Direction::IN } else { Direction::OUT };
                             let port = Port{id, node, channel: channel.to_owned(), direction};
