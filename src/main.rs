@@ -178,13 +178,13 @@ fn on_new_link(node_in: u32, node_out: u32, id: u32, state: &mut State, config: 
     if let Some(node_in) = state.relevant_nodes.get(&node_in) {
         if config.delete_in.contains(&node_in.name) {
             println!("Deleting input link from {}", node_in.name);
-            registry.destroy_global(id);
+            registry.destroy_global(id).into_result().unwrap();
         }
     }
     if let Some(node_out) = state.relevant_nodes.get(&node_out) {
         if config.delete_out.contains(&node_out.name) {
             println!("Deleting output link from {}", node_out.name);
-            registry.destroy_global(id);
+            registry.destroy_global(id).into_result().unwrap();
         }
     }
 }
