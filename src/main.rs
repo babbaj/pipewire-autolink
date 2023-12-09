@@ -13,7 +13,7 @@ use pipewire::registry::{Registry};
 use pipewire::spa::{ForeignDict, ParsableValue};
 
 #[derive(Debug, Default)]
-struct ConfigCache {
+struct Config {
     connect: HashMap<String, HashMap<String, Direction>>,
     delete_in: HashSet<String>,
     delete_out: HashSet<String>,
@@ -34,7 +34,7 @@ struct Port {
 }
 
 
-fn parse_cmdline() -> (Command, ConfigCache) {
+fn parse_cmdline() -> (Command, Config) {
     let link = Arg::new("connect")
         .long("connect")
         .action(ArgAction::Append)
@@ -67,7 +67,7 @@ fn parse_cmdline() -> (Command, ConfigCache) {
             connections.entry(from).or_default().insert(to, dir);
         });
 
-    let mut config = ConfigCache {
+    let mut config = Config {
         connect: connections,
         delete_in: matches.get_many::<String>("delete-in").unwrap_or_default().cloned().collect(),
         delete_out: matches.get_many::<String>("delete-out").unwrap_or_default().cloned().collect(),
@@ -114,27 +114,32 @@ fn main() {
 #[derive(Default)]
 struct State {
     relevant_nodes: HashMap<u32, NodeData>,
-    node_by_name: HashMap<String, u32>,
+    node_by_name: HashMap<String, Vec<u32>>,
     created_links:  HashSet<u32>, // this should be a vec tbh
     temp_links: Vec<(pw::link::Link, pw::link::LinkListener)>
 }
 
 fn on_delete(id: u32, state: &mut State) {
     if let Some(data) = state.relevant_nodes.remove(&id) {
-        state.node_by_name.remove(&data.name);
+        if let Some(vec) = state.node_by_name.get_mut(&data.name) {
+            vec.retain(|x| *x != id);
+            if vec.is_empty() {
+                state.node_by_name.remove(&data.name);
+            }
+        }
     }
     state.created_links.remove(&id);
 }
 
-fn on_new_node(name: String, id: u32, cfg: &ConfigCache, state: &mut State) {
+fn on_new_node(name: String, id: u32, cfg: &Config, state: &mut State) {
     if cfg.all_names.contains(name.as_str()) {
         let name_copy = name.clone();
         state.relevant_nodes.insert(id, NodeData { name, _id: id, ports: Vec::new() });
-        state.node_by_name.insert(name_copy, id);
+        state.node_by_name.entry(name_copy).or_default().push(id);
     }
 }
 
-fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, core: &pw::Core) {
+fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &Config, core: &pw::Core) {
     let mut state = state_rc.borrow_mut();
     if let Some(parent) = state.relevant_nodes.get(&port.node) {
         if let Some(connections) = config.connect.get(parent.name.as_str()) {
@@ -145,7 +150,7 @@ fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, 
                     return;
                 }
 
-                if let Some(other_node) = state.node_by_name.get(other_name) {
+                for other_node in state.node_by_name.get(other_name).iter().flat_map(|v| v.iter()) {
                     if let Some(other_port) = state.relevant_nodes.get(other_node).unwrap().ports.iter()
                         .find(|p| p.channel == port.channel && p.direction != port.direction)
                     {
@@ -176,7 +181,7 @@ fn on_new_port(port: Port, state_rc: &Rc<RefCell<State>>, config: &ConfigCache, 
     }
 }
 
-fn on_new_link(node_in: u32, node_out: u32, id: u32, state: &mut State, config: &ConfigCache, registry: &Registry) {
+fn on_new_link(node_in: u32, node_out: u32, id: u32, state: &mut State, config: &Config, registry: &Registry) {
     if state.created_links.contains(&id) {
         return;
     }
@@ -206,7 +211,7 @@ fn unwrap_arr<const N: usize, T>(arr: [Option<T>; N]) -> Option<[T; N]> {
     return Some(arr.map(|x| unsafe { x.unwrap_unchecked() }));
 }
 
-fn listener_thread(cfg: ConfigCache) {
+fn listener_thread(cfg: Config) {
     let mainloop = pw::MainLoop::new().expect("Failed to create MainLoop for listener thread");
     let context = pw::Context::new(&mainloop).expect("Failed to create PipeWire Context");
     let core = context
@@ -227,7 +232,7 @@ fn listener_thread(cfg: ConfigCache) {
             match global.type_ {
                 ObjectType::Node => {
                     if let Some(name) = props.get("node.name") {
-                        on_new_node(name.to_owned(), global.id, &cfg1, state.borrow_mut().deref_mut());
+                        on_new_node(name.to_owned(), id, &cfg1, state.borrow_mut().deref_mut());
                     }
                 },
                 ObjectType::Port => {
