@@ -43,10 +43,12 @@ fn parse_cmdline() -> (Command, Config) {
         .help("Link a node's output ports to another node's input ports");
     let delete_in = Arg::new("delete-in")
         .long("delete-in")
+        .action(ArgAction::Append)
         .value_name("node.name")
         .help("Delete links from this node's input (links created by autolink are not deleted)");
     let delete_out = Arg::new("delete-out")
         .long("delete-out")
+        .action(ArgAction::Append)
         .value_name("node.name")
         .help("Like delete-in but deletes the output");
     let cmd = Command::new("pipewire-autolink")
